@@ -3,13 +3,12 @@ import pandas as pd
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 import plotly.express as px
 import plotly.graph_objects as go
-import re
 
-st.set_page_config(page_title="Tablero de Pagos ObSBA (Jerarquía)", layout="wide")
+st.set_page_config(page_title="Tablero Jerárquico - ObSBA", layout="wide")
 st.title("📊 Tablero de Pagos por Categorías del Sistema - ObSBA")
 
 # ==========================================
-# FUNCIONES DE FORMATO Y LIMPIEZA
+# 1. FUNCIONES DE FORMATO Y LIMPIEZA
 # ==========================================
 def formatear_moneda(valor):
     try:
@@ -45,7 +44,7 @@ function(params) {
 """)
 
 # ==========================================
-# CARGA Y EXTRACCIÓN DE DATOS
+# 2. CARGA Y EXTRACCIÓN DE DATOS
 # ==========================================
 st.sidebar.header("Carga de Datos")
 archivo_pagos = st.sidebar.file_uploader("Subí el Reporte de Pagos (.csv o .xlsx)", type=['csv', 'xlsx'])
@@ -69,23 +68,7 @@ if archivo_pagos is not None:
             df_pagos = df_pagos.iloc[:indice_corte].copy()
             st.sidebar.success("✅ Resumen final de Totales excluido.")
 
-        # IDENTIFICACIÓN DE LAS COLUMNAS DE CATEGORÍA SEGÚN EL ÍNDICE
-        # Columna Y = Índice 24, Columna AG = Índice 32, Columna AI = Índice 34
-        try:
-            col_Y = df_pagos.columns[24]  # Tipo Benef.
-            col_AG = df_pagos.columns[32] # Desc. Obra
-            col_AI = df_pagos.columns[34] # Desc. Proy.
-            
-            # Rellenar vacíos para que no rompa la agrupación
-            df_pagos['Cat_Madre'] = df_pagos[col_AI].fillna('Sin Categoría Madre').astype(str)
-            df_pagos['Cat_Inferior'] = df_pagos[col_AG].fillna('Sin Categoría Inferior').astype(str)
-            df_pagos['Cat_Final'] = df_pagos[col_Y].fillna('Sin Categoría Final').astype(str)
-            
-        except IndexError:
-            st.error("⚠️ El archivo no tiene las 35 columnas necesarias para extraer las categorías (Y, AG, AI).")
-            st.stop()
-            
-        # EXTRACCIÓN DE ENTE Y PRESTADOR
+        # EXTRACCIÓN DE PRESTADOR
         if 'Benef.OP' in df_pagos.columns:
             df_pagos['Ente_Crudo'] = df_pagos['Benef.OP'].astype(str).str.strip()
             df_pagos['Ente'] = df_pagos['Ente_Crudo'].str.extract(r'(^\d+)', expand=False).fillna('')
@@ -102,7 +85,19 @@ if archivo_pagos is not None:
         else:
             st.error("No se encontró la columna 'Benef.OP'.")
             st.stop()
-            
+
+        # EXTRACCIÓN DE LA JERARQUÍA DEL SISTEMA (Columnas AI, AG, Y)
+        # Índice 34 = AI, Índice 32 = AG, Índice 24 = Y
+        if len(df_pagos.columns) >= 35:
+            df_pagos['Cat_Madre'] = df_pagos.iloc[:, 34].fillna('Sin Categoría Principal').astype(str).str.strip()
+            df_pagos['Cat_Media'] = df_pagos.iloc[:, 32].fillna('Sin Categoría Secundaria').astype(str).str.strip()
+            df_pagos['Cat_Final'] = df_pagos.iloc[:, 24].fillna('Sin Categoría Final').astype(str).str.strip()
+        else:
+            st.warning("⚠️ El archivo cargado no tiene la estructura completa de 35 columnas. Agruparemos todo en una sola categoría.")
+            df_pagos['Cat_Madre'] = 'Categoría Única'
+            df_pagos['Cat_Media'] = '-'
+            df_pagos['Cat_Final'] = '-'
+
         # LIMPIEZA FINANCIERA
         columnas_dinero = ['Imp.OP', 'Imp.Neto', 'Imp.Ret.']
         col_anul = 'Imp.Anul.' if 'Imp.Anul.' in df_pagos.columns else ('Perc. por terceros' if 'Perc. por terceros' in df_pagos.columns else None)
@@ -115,16 +110,20 @@ if archivo_pagos is not None:
             else:
                 df_pagos[col] = 0.0 
                 
-        # FECHAS
+        # PARSEO DE FECHAS INTELIGENTE (Para evitar que agrupe todo en el día 29/09)
         if 'Fecha Pago' in df_pagos.columns:
-            df_pagos['Fecha_Obj'] = pd.to_datetime(df_pagos['Fecha Pago'], dayfirst=True, errors='coerce')
+            # Primero intenta leerlo como Día/Mes/Año
+            df_pagos['Fecha_Obj'] = pd.to_datetime(df_pagos['Fecha Pago'], format='%d/%m/%Y', errors='coerce')
+            # Si falla y hay muchos nulos, asume que el sistema lo exportó como Mes/Día/Año
+            if df_pagos['Fecha_Obj'].isna().sum() > (len(df_pagos) * 0.5):
+                df_pagos['Fecha_Obj'] = pd.to_datetime(df_pagos['Fecha Pago'], format='%m/%d/%Y', errors='coerce')
         else:
             df_pagos['Fecha_Obj'] = pd.NaT
 
         df_final = df_pagos.copy()
 
         # ==========================================
-        # INTERFAZ: TABS, MÉTRICAS Y GRÁFICOS
+        # 3. INTERFAZ: TABS, MÉTRICAS Y GRÁFICOS
         # ==========================================
         if not df_final['Fecha_Obj'].dropna().empty:
             fecha_maxima = df_final['Fecha_Obj'].max()
@@ -147,17 +146,14 @@ if archivo_pagos is not None:
                 return
 
             st.markdown("---")
-            st.header("Análisis por Categorías del Sistema")
+            st.header("Análisis Jerárquico por Categorías (AI > AG > Y)")
             
-            # Selector de Categoría Madre (AI)
-            lista_cat_madre = ['Todas'] + sorted(df_mostrar['Cat_Madre'].unique().tolist())
+            # Selector de Categoría Madre (Columna AI)
+            lista_categorias = ['Todas'] + sorted(df_mostrar['Cat_Madre'].unique().tolist())
             clave_filtro = "filtro_madre_acum" if es_acumulado else "filtro_madre_dia"
-            cat_sel = st.selectbox("Seleccioná la Categoría Principal para filtrar los datos:", lista_cat_madre, key=clave_filtro)
+            cat_sel = st.selectbox("Seleccioná la Categoría Principal (Columna AI) para filtrar métricas y evolución:", lista_categorias, key=clave_filtro)
             
-            if cat_sel != 'Todas':
-                df_reactivo = df_mostrar[df_mostrar['Cat_Madre'] == cat_sel]
-            else:
-                df_reactivo = df_mostrar
+            df_reactivo = df_mostrar[df_mostrar['Cat_Madre'] == cat_sel] if cat_sel != 'Todas' else df_mostrar
 
             if df_reactivo.empty:
                 st.warning("No hay pagos para la categoría seleccionada.")
@@ -165,7 +161,7 @@ if archivo_pagos is not None:
 
             # MÉTTRICAS REACTIVAS
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            titulo_metrica = "Total Gastado" if cat_sel == 'Todas' else f"Gastado ({cat_sel})"
+            titulo_metrica = "Total Gastado" if cat_sel == 'Todas' else f"Gastado"
             col_m1.metric(f"{titulo_metrica} Bruto", formatear_moneda(df_reactivo['Imp.OP'].sum()))
             col_m2.metric(f"{titulo_metrica} Neto", formatear_moneda(df_reactivo['Imp.Neto'].sum()))
             col_m3.metric("Retenciones", formatear_moneda(df_reactivo['Imp.Ret.'].sum()))
@@ -199,29 +195,34 @@ if archivo_pagos is not None:
             col_tabla, col_grafico = st.columns([2, 1])
             
             with col_tabla:
-                st.subheader("Matriz Desplegable (Jerarquía)")
-                # Agrupamos por las 3 categorías jerárquicas más el prestador
-                df_resumen = df_reactivo.groupby(['Cat_Madre', 'Cat_Inferior', 'Cat_Final', 'Prestador'])[columnas_dinero].sum().reset_index()
+                st.subheader("Matriz Desplegable (Jerarquía interna)")
+                
+                # Agrupamos por Prestador primero, luego las 3 categorías del sistema
+                df_resumen = df_reactivo.groupby(['Prestador', 'Cat_Madre', 'Cat_Media', 'Cat_Final'])[columnas_dinero].sum().reset_index()
                 df_resumen = df_resumen[(df_resumen[columnas_dinero] != 0).any(axis=1)]
                 
+                # Ordenamos las columnas para que Prestador esté primero, luego categorías y por último los montos
+                columnas_ordenadas = ['Prestador', 'Cat_Madre', 'Cat_Media', 'Cat_Final'] + columnas_dinero
+                df_resumen = df_resumen[columnas_ordenadas]
+                
                 gb = GridOptionsBuilder.from_dataframe(df_resumen)
-                # Configuración multinivel para que se despliegue en cascada
-                gb.configure_column('Cat_Madre', rowGroup=True, hide=False, header_name="Cat. Principal (AI)")
-                gb.configure_column('Cat_Inferior', rowGroup=True, hide=False, header_name="Cat. Media (AG)")
-                gb.configure_column('Cat_Final', rowGroup=True, hide=False, header_name="Cat. Final (Y)")
+                
+                # Configuramos la jerarquía visual de AgGrid
+                gb.configure_column('Prestador', rowGroup=True, hide=False)
+                gb.configure_column('Cat_Madre', header_name="Cat. Principal (AI)")
+                gb.configure_column('Cat_Media', header_name="Cat. Media (AG)")
+                gb.configure_column('Cat_Final', header_name="Cat. Final (Y)")
                 
                 for col in columnas_dinero:
                     gb.configure_column(col, type=["numericColumn"], valueFormatter=formato_pesos)
                 
-                # Configurar para que agrupe por defecto al inicio
-                gb.configure_grid_options(groupDefaultExpanded=0) 
-                
+                gb.configure_grid_options(groupDefaultExpanded=0) # Mantiene las filas de prestadores cerradas por defecto
                 grid_options = gb.build()
-                AgGrid(df_resumen, gridOptions=grid_options, height=500, theme='streamlit', allow_unsafe_jscode=True)
+                AgGrid(df_resumen, gridOptions=grid_options, height=550, theme='streamlit', allow_unsafe_jscode=True)
 
             with col_grafico:
                 st.subheader("Participación Global (Cat. Principal)")
-                # Torta en base a la Categoría Madre del total general (df_mostrar)
+                # Gráfico Torta siempre muestra el global, indiferente a la selección.
                 df_torta = df_mostrar.groupby('Cat_Madre')['Imp.OP'].sum().reset_index()
                 df_torta = df_torta[df_torta['Imp.OP'] > 0]
                 
@@ -246,11 +247,11 @@ if archivo_pagos is not None:
             render_tablero(df_final, es_acumulado=True)
 
         # ==========================================
-        # BUSCADOR DETALLADO 
+        # 4. BUSCADOR DETALLADO 
         # ==========================================
         st.markdown("---")
         st.header("🔍 Buscador Detallado de Prestador")
-        busqueda_texto = st.text_input("Ingresá el nombre o código de ente de un prestador para ver su historial:")
+        busqueda_texto = st.text_input("Ingresá el nombre o código de ente de un prestador para ver su historial acumulado:")
         
         if busqueda_texto:
             df_busq = df_final[df_final['Prestador'].str.contains(busqueda_texto, case=False, na=False) | 
@@ -265,7 +266,7 @@ if archivo_pagos is not None:
                 if col_anul:
                     col_b4.metric("Anulaciones", formatear_moneda(df_busq[col_anul].sum()))
                 
-                df_mostrar_b = df_busq[['Fecha_Obj', 'Ente', 'Prestador', 'Cat_Madre', 'Cat_Inferior', 'Cat_Final'] + columnas_dinero].copy()
+                df_mostrar_b = df_busq[['Fecha_Obj', 'Ente', 'Prestador', 'Cat_Madre', 'Cat_Media', 'Cat_Final'] + columnas_dinero].copy()
                 for col in columnas_dinero:
                     if col in df_mostrar_b.columns:
                         df_mostrar_b[col] = df_mostrar_b[col].apply(formatear_moneda)
